@@ -1,0 +1,32 @@
+# Binaries
+lazysnap
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# Go workspace
+vendor/
+
+# devenv / direnv
+.devenv/
+.devenv.flake.nix
+.direnv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
