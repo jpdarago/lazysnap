@@ -43,6 +43,11 @@ type Model struct {
 	passphraseInput textinput.Model
 	needPassphrase  bool
 
+	searchInput   textinput.Model
+	searching     bool
+	searchResults []searchResult
+	showSearch    bool
+
 	debug     *debugLog
 	showDebug bool
 }
@@ -61,6 +66,10 @@ func NewModel(tc *tarsnap.Client, db *cache.DB) Model {
 
 	pi.Focus()
 
+	si := textinput.New()
+	si.Placeholder = "search files across archives..."
+	si.CharLimit = 200
+
 	dl := newDebugLog()
 	dl.log("lazysnap starting")
 	dl.log("keyfile=%q", tc.Keyfile)
@@ -71,6 +80,7 @@ func NewModel(tc *tarsnap.Client, db *cache.DB) Model {
 		cache:           db,
 		filterInput:     ti,
 		passphraseInput: pi,
+		searchInput:     si,
 		needPassphrase:  true,
 		debug:           dl,
 	}
@@ -120,6 +130,16 @@ type archiveDeletedMsg struct {
 
 // debugTickMsg is sent to trigger a re-render when new debug log lines arrive.
 type debugTickMsg struct{}
+
+type searchResult struct {
+	Archive string
+	Files   []string
+}
+
+type searchCompleteMsg struct {
+	query   string
+	results []searchResult
+}
 
 // --- Update ---
 
@@ -171,6 +191,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case debugTickMsg:
 		return m, nil
 
+	case searchCompleteMsg:
+		m.debug.log("search complete: %d archives match %q", len(msg.results), msg.query)
+		m.searchResults = msg.results
+		m.showSearch = true
+		m.loading = false
+		return m, nil
+
 	case tea.KeyMsg:
 		if msg.String() == "f2" || msg.String() == "ctrl+d" {
 			m.showDebug = !m.showDebug
@@ -182,6 +209,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.confirming {
 			return m.updateConfirm(msg)
+		}
+		if m.searching {
+			return m.updateSearch(msg)
+		}
+		if m.showSearch {
+			return m.updateSearchResults(msg)
 		}
 		if m.filtering {
 			return m.updateFilter(msg)
@@ -225,6 +258,12 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.filtering = true
 		m.filterInput.Focus()
+		return m, textinput.Blink
+
+	case "s":
+		m.searching = true
+		m.searchInput.SetValue("")
+		m.searchInput.Focus()
 		return m, textinput.Blink
 
 	case "d":
@@ -304,11 +343,71 @@ func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.searching = false
+		m.searchInput.Blur()
+		return m, nil
+	case "enter":
+		query := m.searchInput.Value()
+		if query == "" {
+			m.searching = false
+			m.searchInput.Blur()
+			return m, nil
+		}
+		m.searching = false
+		m.searchInput.Blur()
+		m.loading = true
+		m.debug.log("searching files for %q", query)
+		return m, m.runSearch(query)
+	}
+
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateSearchResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		m.showSearch = false
+		m.searchResults = nil
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) runSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		results, err := m.cache.SearchFiles(query)
+		if err != nil {
+			m.debug.log("search error: %v", err)
+			return errMsg{err}
+		}
+		// Convert map to sorted slice
+		var sr []searchResult
+		for archive, files := range results {
+			sr = append(sr, searchResult{Archive: archive, Files: files})
+		}
+		sort.Slice(sr, func(i, j int) bool {
+			return sr[i].Archive < sr[j].Archive
+		})
+		return searchCompleteMsg{query: query, results: sr}
+	}
+}
+
 // --- View ---
 
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
+	}
+
+	if m.showSearch {
+		return m.renderSearchResults()
 	}
 
 	if m.needPassphrase {
@@ -393,15 +492,58 @@ func (m Model) View() string {
 	// Status bar
 	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg)
 
-	// Filter / confirm overlay
+	// Filter / confirm / search overlay
 	var footer string
 	if m.confirming {
 		footer = "\n" + errorStyle.Render(m.confirmMsg)
 	} else if m.filtering {
 		footer = "\n" + m.filterInput.View()
+	} else if m.searching {
+		footer = "\n" + m.searchInput.View()
 	}
 
 	return main + "\n" + status + footer
+}
+
+func (m Model) renderSearchResults() string {
+	contentWidth := m.width - 4
+	contentHeight := m.height - 4
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Search Results"))
+	b.WriteString("\n\n")
+
+	if len(m.searchResults) == 0 {
+		b.WriteString(dimStyle.Render("No matching files found"))
+	} else {
+		lines := 0
+		maxLines := contentHeight - 4
+		for _, sr := range m.searchResults {
+			if lines >= maxLines {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("\n... more results truncated")))
+				break
+			}
+			b.WriteString(selectedItemStyle.Render(sr.Archive))
+			b.WriteString("\n")
+			lines++
+			for _, f := range sr.Files {
+				if lines >= maxLines {
+					b.WriteString(dimStyle.Render(fmt.Sprintf("  ... and more files")))
+					lines++
+					break
+				}
+				b.WriteString(fmt.Sprintf("  %s\n", truncate(f, contentWidth-4)))
+				lines++
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("press esc to close"))
+
+	content := panelStyle.Width(contentWidth).Height(contentHeight).Render(b.String())
+	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg)
+	return content + "\n" + status
 }
 
 func (m Model) renderArchiveList(width, height int) string {

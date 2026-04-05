@@ -125,6 +125,29 @@ func (db *DB) PutFiles(archiveName string, files []tarsnap.FileEntry) error {
 	return tx.Commit()
 }
 
+// SearchFiles finds archives containing files whose path matches a substring.
+// Returns a map of archive name to matching file paths.
+func (db *DB) SearchFiles(query string) (map[string][]string, error) {
+	rows, err := db.conn.Query(
+		"SELECT archive_name, path FROM archive_files WHERE path LIKE ? ORDER BY archive_name, path",
+		"%"+query+"%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make(map[string][]string)
+	for rows.Next() {
+		var archive, path string
+		if err := rows.Scan(&archive, &path); err != nil {
+			return nil, err
+		}
+		results[archive] = append(results[archive], path)
+	}
+	return results, rows.Err()
+}
+
 // ClearStats removes all cached stats so they are re-fetched.
 func (db *DB) ClearStats() error {
 	_, err := db.conn.Exec("DELETE FROM archive_stats")

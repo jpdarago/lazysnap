@@ -16,7 +16,7 @@ func renderStatusBar(width int, archiveCount int, loading bool, errMsg string) s
 		left = fmt.Sprintf(" %d archives", archiveCount)
 	}
 
-	right := " q:quit  R:refresh  d:delete  /:filter  F2/ctrl-d:debug "
+	right := " q:quit  R:refresh  d:delete  /:filter  s:search  F2/ctrl-d:debug "
 
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
