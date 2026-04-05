@@ -6,4 +6,6 @@
   ];
 
   languages.go.enable = true;
+
+  env.GOFLAGS = "-mod=vendor";
 }
