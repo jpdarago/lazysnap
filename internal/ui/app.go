@@ -2,8 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,6 +33,7 @@ type Model struct {
 	files        []tarsnap.FileEntry
 	loading      bool
 	errMsg       string
+	statusMsg    string
 	width        int
 	height       int
 	filterInput  textinput.Model
@@ -48,8 +51,17 @@ type Model struct {
 	searchResults []searchResult
 	showSearch    bool
 
+	promptInput  textinput.Model
+	promptMode   promptMode
+	promptLabel  string
+	createName   string // stored between create prompts
+
 	debug     *debugLog
 	showDebug bool
+
+	restoring       bool   // true while a restore is in progress
+	restoreDone     bool   // true briefly after restore completes
+	restoreProgress string // current progress line during restore
 }
 
 // NewModel creates a new root model.
@@ -70,6 +82,9 @@ func NewModel(tc *tarsnap.Client, db *cache.DB) Model {
 	si.Placeholder = "search files across archives..."
 	si.CharLimit = 200
 
+	pri := textinput.New()
+	pri.CharLimit = 500
+
 	dl := newDebugLog()
 	dl.log("lazysnap starting")
 	dl.log("keyfile=%q", tc.Keyfile)
@@ -81,6 +96,7 @@ func NewModel(tc *tarsnap.Client, db *cache.DB) Model {
 		filterInput:     ti,
 		passphraseInput: pi,
 		searchInput:     si,
+		promptInput:     pri,
 		needPassphrase:  true,
 		debug:           dl,
 	}
@@ -97,7 +113,8 @@ func (m Model) Init() tea.Cmd {
 // NotifyFromDebugLog wires the debug log to send messages to the tea.Program
 // so the UI re-renders when new debug lines arrive during long-running commands.
 // This must be called before p.Run(). It works because debug is a shared pointer.
-func (m Model) NotifyFromDebugLog(p *tea.Program) {
+func (m *Model) NotifyFromDebugLog(p *tea.Program) {
+	m.debug.prog = p
 	m.debug.notify = func() {
 		// Must be non-blocking: this is called from inside tea.Cmd goroutines.
 		// p.Send blocks on an unbuffered channel, which would deadlock if
@@ -141,6 +158,31 @@ type searchCompleteMsg struct {
 	results []searchResult
 }
 
+type promptMode int
+
+const (
+	promptNone promptMode = iota
+	promptRestore
+	promptCreateName
+	promptCreatePath
+	promptBasePath
+)
+
+type archiveRestoredMsg struct {
+	archive string
+	target  string
+}
+
+type archiveCreatedMsg struct {
+	name string
+}
+
+type restoreProgressMsg struct {
+	line string
+}
+
+type restoreDoneDismissMsg struct{}
+
 // --- Update ---
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -159,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.archives = msg.archives
 		m.loading = false
 		m.errMsg = ""
+		m.statusMsg = ""
 		if len(m.archives) > 0 {
 			m.cursor = 0
 			return m, m.loadDetail()
@@ -169,27 +212,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.debug.log("stats loaded for %q: total=%d compressed=%d",
 			msg.stats.ArchiveName, msg.stats.TotalSize, msg.stats.CompressedSize)
 		m.stats = msg.stats
+		m.errMsg = ""
 		return m, nil
 
 	case filesLoadedMsg:
 		m.debug.log("files loaded: %d files", len(msg.files))
 		m.files = msg.files
+		m.errMsg = ""
 		return m, nil
 
 	case archiveDeletedMsg:
 		m.debug.log("archive deleted: %q", msg.name)
 		m.confirming = false
 		m.confirmMsg = ""
+		m.errMsg = ""
 		return m, m.loadArchives()
 
 	case errMsg:
 		m.debug.log("ERROR: %v", msg.err)
 		m.loading = false
+		m.restoring = false
+		m.restoreProgress = ""
 		m.errMsg = msg.err.Error()
 		return m, nil
 
 	case debugTickMsg:
 		return m, nil
+
+	case restoreProgressMsg:
+		m.restoreProgress = msg.line
+		return m, nil
+
+	case archiveRestoredMsg:
+		m.debug.log("archive %q restored to %q", msg.archive, msg.target)
+		m.loading = false
+		m.restoring = false
+		m.restoreDone = true
+		m.restoreProgress = fmt.Sprintf("Restored %q to %s", msg.archive, msg.target)
+		m.errMsg = ""
+		m.statusMsg = m.restoreProgress
+		m.cache.SetConfig("last_restore_dir", msg.target)
+		m.cache.SetRestored(msg.archive, msg.target)
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return restoreDoneDismissMsg{}
+		})
+
+	case restoreDoneDismissMsg:
+		m.restoreDone = false
+		m.restoreProgress = ""
+		return m, nil
+
+	case archiveCreatedMsg:
+		m.debug.log("archive %q created", msg.name)
+		m.loading = false
+		m.errMsg = ""
+		m.statusMsg = fmt.Sprintf("Created archive %q", msg.name)
+		return m, m.refreshArchives()
 
 	case searchCompleteMsg:
 		m.debug.log("search complete: %d archives match %q", len(msg.results), msg.query)
@@ -204,11 +282,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.debug.log("debug panel toggled: %v", m.showDebug)
 			return m, nil
 		}
+		if (m.restoring || m.restoreDone) && !m.confirming {
+			// Block all input while restore is in progress (except debug toggle above and quit).
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		if m.needPassphrase {
 			return m.updatePassphrase(msg)
 		}
 		if m.confirming {
 			return m.updateConfirm(msg)
+		}
+		if m.promptMode != promptNone {
+			return m.updatePrompt(msg)
 		}
 		if m.searching {
 			return m.updateSearch(msg)
@@ -264,6 +352,38 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searching = true
 		m.searchInput.SetValue("")
 		m.searchInput.Focus()
+		return m, textinput.Blink
+
+	case "r":
+		if len(filtered) > 0 && m.cursor < len(filtered) {
+			m.promptMode = promptRestore
+			m.promptLabel = fmt.Sprintf("Restore %q to directory:", filtered[m.cursor].Name)
+			m.promptInput.Placeholder = "/path/to/restore"
+			defaultDir := m.cache.GetConfig("last_restore_dir")
+			if defaultDir == "" {
+				defaultDir = m.cache.GetConfig("base_path")
+			}
+			m.promptInput.SetValue(defaultDir)
+			m.promptInput.CursorEnd()
+			m.promptInput.Focus()
+			return m, textinput.Blink
+		}
+
+	case "c":
+		m.promptMode = promptCreateName
+		m.promptLabel = "New archive name:"
+		m.promptInput.Placeholder = "my-backup-2026-04-05"
+		m.promptInput.SetValue("")
+		m.promptInput.Focus()
+		return m, textinput.Blink
+
+	case "B":
+		m.promptMode = promptBasePath
+		m.promptLabel = "Set base directory for restore/create:"
+		m.promptInput.Placeholder = "/path/to/base"
+		m.promptInput.SetValue(m.cache.GetConfig("base_path"))
+		m.promptInput.CursorEnd()
+		m.promptInput.Focus()
 		return m, textinput.Blink
 
 	case "d":
@@ -335,10 +455,20 @@ func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		action := m.confirmAction
+		m.confirming = false
+		m.confirmMsg = ""
+		m.confirmAction = nil
+		m.loading = true
+		if m.restoring {
+			m.restoreProgress = "Starting restore..."
+		}
 		return m, func() tea.Msg { return action() }
 	case "n", "N", "esc":
 		m.confirming = false
 		m.confirmMsg = ""
+		m.confirmAction = nil
+		m.restoring = false
+		m.restoreProgress = ""
 	}
 	return m, nil
 }
@@ -380,6 +510,108 @@ func (m Model) updateSearchResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.promptMode = promptNone
+		m.promptInput.Blur()
+		return m, nil
+	case "enter":
+		value := m.promptInput.Value()
+		if value == "" {
+			return m, nil
+		}
+		m.promptInput.Blur()
+
+		switch m.promptMode {
+		case promptRestore:
+			m.promptMode = promptNone
+			filtered := m.filteredArchives()
+			if m.cursor < len(filtered) {
+				archiveName := filtered[m.cursor].Name
+				if _, err := os.Stat(value); os.IsNotExist(err) {
+					m.confirming = true
+					m.restoring = true
+					m.restoreProgress = "Waiting for confirmation..."
+					m.confirmMsg = fmt.Sprintf("Directory %q does not exist. Create it? (y/n)", value)
+					m.confirmAction = func() tea.Msg {
+						if err := os.MkdirAll(value, 0o755); err != nil {
+							return errMsg{fmt.Errorf("create directory: %w", err)}
+						}
+						onProgress := func(p tarsnap.RestoreProgress) {
+							m.debug.send(restoreProgressMsg{line: p.Line})
+						}
+						if err := m.tarsnap.RestoreWithProgress(archiveName, value, onProgress); err != nil {
+							m.debug.log("restore error: %v", err)
+							return errMsg{err}
+						}
+						return archiveRestoredMsg{archive: archiveName, target: value}
+					}
+					return m, nil
+				}
+				m.loading = true
+				m.restoring = true
+				m.restoreProgress = "Starting restore..."
+				m.debug.log("restoring %q to %q", archiveName, value)
+				return m, m.runRestore(archiveName, value)
+			}
+
+		case promptCreateName:
+			m.createName = value
+			m.promptMode = promptCreatePath
+			m.promptLabel = fmt.Sprintf("Path to back up as %q:", m.createName)
+			m.promptInput.Placeholder = "/path/to/folder"
+			basePath := m.cache.GetConfig("base_path")
+			m.promptInput.SetValue(basePath)
+			m.promptInput.CursorEnd()
+			m.promptInput.Focus()
+			return m, textinput.Blink
+
+		case promptCreatePath:
+			name := m.createName
+			m.promptMode = promptNone
+			m.loading = true
+			m.debug.log("creating archive %q from %q", name, value)
+			return m, m.runCreate(name, value)
+
+		case promptBasePath:
+			m.promptMode = promptNone
+			m.cache.SetConfig("base_path", value)
+			m.debug.log("base path set to %q", value)
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.promptInput, cmd = m.promptInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) runRestore(archiveName, targetDir string) tea.Cmd {
+	return func() tea.Msg {
+		onProgress := func(p tarsnap.RestoreProgress) {
+			m.debug.send(restoreProgressMsg{line: p.Line})
+		}
+		if err := m.tarsnap.RestoreWithProgress(archiveName, targetDir, onProgress); err != nil {
+			m.debug.log("restore error: %v", err)
+			return errMsg{err}
+		}
+		return archiveRestoredMsg{archive: archiveName, target: targetDir}
+	}
+}
+
+func (m Model) runCreate(name, path string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.tarsnap.CreateArchive(name, []string{path}); err != nil {
+			m.debug.log("create error: %v", err)
+			return errMsg{err}
+		}
+		return archiveCreatedMsg{name: name}
+	}
+}
+
 func (m Model) runSearch(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, err := m.cache.SearchFiles(query)
@@ -413,7 +645,7 @@ func (m Model) View() string {
 	if m.needPassphrase {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 			lipgloss.JoinVertical(lipgloss.Center,
-				titleStyle.Render("lazysnap"),
+				titleStyle.Render("Lazysnap: Tarsnap...for the truly lazy!"),
 				"",
 				"Enter tarsnap key passphrase:",
 				m.passphraseInput.View(),
@@ -432,7 +664,24 @@ func (m Model) View() string {
 	if rightWidth < 20 {
 		rightWidth = 20
 	}
-	contentHeight := m.height - 4 // status bar + borders
+	// Calculate footer first so we can subtract its height from content
+	var footer string
+	if m.confirming {
+		footer = errorStyle.Render(m.confirmMsg)
+	} else if m.filtering {
+		footer = m.filterInput.View()
+	} else if m.searching {
+		footer = m.searchInput.View()
+	} else if m.promptMode != promptNone {
+		footer = m.promptLabel + "\n" + m.promptInput.View()
+	}
+
+	footerHeight := 0
+	if footer != "" {
+		footerHeight = lipgloss.Height(footer) + 1 // +1 for the newline separator
+	}
+
+	contentHeight := m.height - 2 - footerHeight // 1 for status bar, 1 for newline
 
 	if m.showDebug {
 		// Split vertically: top half for normal panels, bottom half for debug
@@ -459,16 +708,21 @@ func (m Model) View() string {
 		debugContent := m.debug.render(debugWidth, debugHeight)
 		bottom := panelStyle.Width(debugWidth).Height(debugHeight).Render(debugContent)
 
-		status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg)
+		status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg, m.statusMsg)
 
-		var footer string
-		if m.confirming {
-			footer = "\n" + errorStyle.Render(m.confirmMsg)
-		} else if m.filtering {
-			footer = "\n" + m.filterInput.View()
+		result := top + "\n" + bottom + "\n" + status
+		if footer != "" {
+			result += "\n" + footer
 		}
 
-		return top + "\n" + bottom + "\n" + status + footer
+		if (m.restoring || m.restoreDone) && !m.confirming {
+			popup := m.renderProgressPopup()
+			result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popup,
+				lipgloss.WithWhitespaceChars(" "),
+			)
+		}
+
+		return result
 	}
 
 	// Archive list
@@ -490,19 +744,47 @@ func (m Model) View() string {
 	main := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	// Status bar
-	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg)
+	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg, m.statusMsg)
 
-	// Filter / confirm / search overlay
-	var footer string
-	if m.confirming {
-		footer = "\n" + errorStyle.Render(m.confirmMsg)
-	} else if m.filtering {
-		footer = "\n" + m.filterInput.View()
-	} else if m.searching {
-		footer = "\n" + m.searchInput.View()
+	result := main + "\n" + status
+	if footer != "" {
+		result += "\n" + footer
 	}
 
-	return main + "\n" + status + footer
+	if (m.restoring || m.restoreDone) && !m.confirming {
+		popup := m.renderProgressPopup()
+		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popup,
+			lipgloss.WithWhitespaceChars(" "),
+		)
+	}
+
+	return result
+}
+
+func (m Model) renderProgressPopup() string {
+	maxWidth := m.width - 10
+	if maxWidth > 60 {
+		maxWidth = 60
+	}
+
+	line := m.restoreProgress
+	if line == "" {
+		line = "Waiting for data..."
+	}
+	if len(line) > maxWidth-4 {
+		line = line[:maxWidth-7] + "..."
+	}
+
+	title := "Restoring..."
+	if m.restoreDone {
+		title = "Restored!"
+	}
+	content := lipgloss.JoinVertical(lipgloss.Center,
+		titleStyle.Render(title),
+		"",
+		line,
+	)
+	return activePanelStyle.Width(maxWidth).Render(content)
 }
 
 func (m Model) renderSearchResults() string {
@@ -542,7 +824,7 @@ func (m Model) renderSearchResults() string {
 	b.WriteString(dimStyle.Render("press esc to close"))
 
 	content := panelStyle.Width(contentWidth).Height(contentHeight).Render(b.String())
-	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg)
+	status := renderStatusBar(m.width, len(m.archives), m.loading, m.errMsg, m.statusMsg)
 	return content + "\n" + status
 }
 
@@ -605,6 +887,10 @@ func (m Model) renderDetail(width, height int) string {
 		b.WriteString(fmt.Sprintf("Comp:  %s (unique: %s)\n",
 			humanBytes(m.stats.CompressedSize),
 			humanBytes(m.stats.UniqueCompSize)))
+	}
+
+	if restoredAt, restoredTo := m.cache.GetRestoreInfo(a.Name); !restoredAt.IsZero() {
+		b.WriteString(fmt.Sprintf("Last restored: %s → %s\n", restoredAt.Format("2006-01-02 15:04"), restoredTo))
 	}
 
 	if m.files != nil {

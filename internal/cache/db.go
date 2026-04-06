@@ -69,9 +69,22 @@ func (db *DB) migrate() error {
 			picocenters REAL NOT NULL,
 			fetched_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS config (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+
+	// Add restore tracking columns (idempotent).
+	for _, col := range []string{
+		"ALTER TABLE archives ADD COLUMN last_restored_at TEXT",
+		"ALTER TABLE archives ADD COLUMN last_restored_to TEXT",
+	} {
+		db.conn.Exec(col) // ignore "duplicate column" errors
 	}
 	return nil
 }

@@ -154,6 +154,45 @@ func (db *DB) ClearStats() error {
 	return err
 }
 
+// SetRestored records when and where an archive was last restored.
+func (db *DB) SetRestored(archiveName, targetDir string) error {
+	_, err := db.conn.Exec(
+		"UPDATE archives SET last_restored_at = ?, last_restored_to = ? WHERE name = ?",
+		time.Now().Format(time.RFC3339), targetDir, archiveName,
+	)
+	return err
+}
+
+// GetRestoreInfo returns the last restore time and directory for an archive, or zero values if never restored.
+func (db *DB) GetRestoreInfo(archiveName string) (time.Time, string) {
+	var ts, dir sql.NullString
+	db.conn.QueryRow(
+		"SELECT last_restored_at, last_restored_to FROM archives WHERE name = ?",
+		archiveName,
+	).Scan(&ts, &dir)
+	if !ts.Valid {
+		return time.Time{}, ""
+	}
+	t, _ := time.Parse(time.RFC3339, ts.String)
+	return t, dir.String
+}
+
+// GetConfig returns a config value, or empty string if not set.
+func (db *DB) GetConfig(key string) string {
+	var val string
+	err := db.conn.QueryRow("SELECT value FROM config WHERE key = ?", key).Scan(&val)
+	if err != nil {
+		return ""
+	}
+	return val
+}
+
+// SetConfig stores a config value.
+func (db *DB) SetConfig(key, value string) error {
+	_, err := db.conn.Exec("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", key, value)
+	return err
+}
+
 // DeleteArchive removes an archive and its associated data from the cache.
 func (db *DB) DeleteArchive(name string) error {
 	tx, err := db.conn.Begin()

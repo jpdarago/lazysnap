@@ -141,13 +141,138 @@ func (c *Client) DeleteArchive(name string) error {
 	return nil
 }
 
+// RestoreProgress holds a progress update from a restore operation.
+type RestoreProgress struct {
+	Line string // raw progress line from tarsnap
+}
+
 // Restore extracts files from an archive to the given directory.
 func (c *Client) Restore(archiveName string, targetDir string) error {
-	_, err := c.run("-x", "-f", archiveName, "-C", targetDir)
-	if err != nil {
-		return fmt.Errorf("restore: %w", err)
+	return c.RestoreWithProgress(archiveName, targetDir, nil)
+}
+
+// RestoreWithProgress extracts files and reports progress via the callback.
+func (c *Client) RestoreWithProgress(archiveName, targetDir string, onProgress func(RestoreProgress)) error {
+	args := []string{"-x", "-f", archiveName, "-C", targetDir, "--progress-bytes", "1M"}
+	if c.Keyfile != "" {
+		args = append([]string{"--keyfile", c.Keyfile}, args...)
 	}
+	if c.Passphrase != "" {
+		args = append([]string{"--passphrase", "dev:stdin-once"}, args...)
+	}
+	c.log("exec: %s %s", c.Binary, strings.Join(args, " "))
+
+	var cmd *exec.Cmd
+	var cancel context.CancelFunc
+	if c.Timeout > 0 {
+		ctx, cf := context.WithTimeout(context.Background(), c.Timeout)
+		cancel = cf
+		cmd = exec.CommandContext(ctx, c.Binary, args...)
+	} else {
+		cmd = exec.Command(c.Binary, args...)
+	}
+	if cancel != nil {
+		defer cancel()
+	}
+
+	if c.Passphrase != "" {
+		cmd.Stdin = strings.NewReader(c.Passphrase + "\n")
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+	cmd.Stdout = nil
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case t := <-ticker.C:
+				elapsed := t.Sub(start).Truncate(time.Second)
+				c.log("restore: still waiting... (%s elapsed)", elapsed)
+				if onProgress != nil {
+					onProgress(RestoreProgress{Line: fmt.Sprintf("Restoring... %s elapsed", elapsed)})
+				}
+			}
+		}
+	}()
+
+	var stderrBuf bytes.Buffer
+	scanner := bufio.NewScanner(stderrPipe)
+	// Tarsnap progress uses \r for in-place updates; split on both \r and \n.
+	scanner.Split(scanLinesOrCR)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		stderrBuf.WriteString(line)
+		stderrBuf.WriteByte('\n')
+		c.log("stderr: %s", line)
+		if onProgress != nil {
+			onProgress(RestoreProgress{Line: line})
+		}
+	}
+
+	err = cmd.Wait()
+	close(done)
+	elapsed := time.Since(start)
+	if err != nil {
+		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			c.log("restore killed after %s (timeout or signal)", elapsed)
+			return fmt.Errorf("restore timed out after %s", elapsed)
+		}
+		c.log("restore failed after %s: %v: %s", elapsed, err, stderrBuf.String())
+		return fmt.Errorf("restore: %w: %s", err, stderrBuf.String())
+	}
+	c.log("restore completed in %s", elapsed)
 	return nil
+}
+
+// scanLinesOrCR is a bufio.SplitFunc that splits on \n, \r\n, or \r.
+// This handles tarsnap's progress output which uses \r for in-place updates.
+func scanLinesOrCR(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i, b := range data {
+		if b == '\n' {
+			// \r\n
+			if i > 0 && data[i-1] == '\r' {
+				return i + 1, data[:i-1], nil
+			}
+			return i + 1, data[:i], nil
+		}
+		if b == '\r' {
+			// Check if next byte is \n — if so, let the \n case handle it.
+			if i+1 < len(data) {
+				if data[i+1] == '\n' {
+					continue
+				}
+				return i + 1, data[:i], nil
+			}
+			// At end of buffer, need more data to decide.
+			if !atEOF {
+				return 0, nil, nil
+			}
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 // Fsck runs tarsnap --fsck.

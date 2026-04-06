@@ -14,7 +14,7 @@ import (
 
 func main() {
 	keyfile := flag.String("keyfile", "", "path to tarsnap key file (optional, defaults to tarsnaprc)")
-	timeout := flag.Duration("timeout", 2*time.Minute, "timeout for tarsnap commands (0 to disable)")
+	timeout := flag.Duration("timeout", 30*time.Minute, "timeout for tarsnap commands (0 to disable)")
 	flag.Parse()
 
 	db, err := cache.Open()

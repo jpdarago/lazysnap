@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const maxDebugLines = 200
@@ -14,6 +16,14 @@ type debugLog struct {
 	lines  []string
 	start  time.Time
 	notify func() // called after each log to trigger UI re-render
+	prog   *tea.Program
+}
+
+// send sends a message to the bubbletea program in a non-blocking goroutine.
+func (d *debugLog) send(msg tea.Msg) {
+	if d.prog != nil {
+		go d.prog.Send(msg)
+	}
 }
 
 func newDebugLog() *debugLog {
