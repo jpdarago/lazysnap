@@ -26,21 +26,21 @@ type Model struct {
 	tarsnap *tarsnap.Client
 	cache   *cache.DB
 
-	archives     []tarsnap.Archive
-	cursor       int
-	activePanel  panel
-	stats        *tarsnap.ArchiveStats
-	files        []tarsnap.FileEntry
-	loading      bool
-	errMsg       string
-	statusMsg    string
-	width        int
-	height       int
-	filterInput  textinput.Model
-	filtering    bool
-	filterText   string
-	confirmMsg   string
-	confirming   bool
+	archives      []tarsnap.Archive
+	cursor        int
+	activePanel   panel
+	stats         *tarsnap.ArchiveStats
+	files         []tarsnap.FileEntry
+	loading       bool
+	errMsg        string
+	statusMsg     string
+	width         int
+	height        int
+	filterInput   textinput.Model
+	filtering     bool
+	filterText    string
+	confirmMsg    string
+	confirming    bool
 	confirmAction func() tea.Msg
 
 	passphraseInput textinput.Model
@@ -51,10 +51,10 @@ type Model struct {
 	searchResults []searchResult
 	showSearch    bool
 
-	promptInput  textinput.Model
-	promptMode   promptMode
-	promptLabel  string
-	createName   string // stored between create prompts
+	promptInput textinput.Model
+	promptMode  promptMode
+	promptLabel string
+	createName  string // stored between create prompts
 
 	debug     *debugLog
 	showDebug bool

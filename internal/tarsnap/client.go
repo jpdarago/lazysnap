@@ -18,7 +18,7 @@ type LogFunc func(format string, args ...any)
 type Client struct {
 	Binary     string        // path to tarsnap binary, defaults to "tarsnap"
 	Keyfile    string        // optional path to tarsnap key file
-	Passphrase string       // passphrase for encrypted key files
+	Passphrase string        // passphrase for encrypted key files
 	Timeout    time.Duration // command timeout, 0 means no timeout
 	Log        LogFunc
 }
