@@ -137,6 +137,38 @@ go install github.com/jpdarago/lazysnap@latest
 
 Or download a prebuilt binary from the [releases page](https://github.com/jpdarago/lazysnap/releases).
 
+## Setting up a new machine
+
+tarsnap needs your key file to access your archives. If you keep a backup of the
+key (for example in a password manager), `lazysnap init` bootstraps a fresh
+machine in one step: it writes the key, generates a `~/.tarsnaprc`, and rebuilds
+the local cache with `tarsnap --fsck`.
+
+lazysnap **never** talks to a password manager — you decide how the key reaches
+it, via stdin or a file:
+
+```sh
+# 1. Install (also pulls in tarsnap)
+brew install jpdarago/tap/lazysnap
+
+# 2. Provide the key. Pick whichever fits how you stored it:
+pbpaste | lazysnap init                       # paste from clipboard (macOS)
+lazysnap init --key-file ~/Downloads/tarsnap.key   # from an exported file
+lazysnap init                                 # paste interactively, then Ctrl-D
+
+# 3. Browse
+lazysnap
+```
+
+`init` refuses to overwrite an existing key or config unless you pass `--force`,
+and writes the key with `0600` permissions. See `lazysnap init --help` for all
+flags (`--key-out`, `--cachedir`, `--rc`, `--no-fsck`, ...).
+
+> **Backing up the key:** your tarsnap key file (`~/.tarsnap.key`) is the only
+> thing needed to recover. Store its full contents — from `# START OF TARSNAP
+> KEY FILE` to the end — somewhere safe. Without it, your archives are
+> unrecoverable.
+
 ## Getting Started
 
 ```sh

@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jpdarago/lazysnap/internal/cache"
+	"github.com/jpdarago/lazysnap/internal/setup"
 	"github.com/jpdarago/lazysnap/internal/tarsnap"
 	"github.com/jpdarago/lazysnap/internal/ui"
 )
@@ -20,6 +21,16 @@ var (
 )
 
 func main() {
+	// Subcommands are dispatched before flag parsing so they can define their
+	// own flags.
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		if err := setup.Init(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	keyfile := flag.String("keyfile", "", "path to tarsnap key file (optional, defaults to tarsnaprc)")
 	timeout := flag.Duration("timeout", 30*time.Minute, "timeout for tarsnap commands (0 to disable)")
 	showVersion := flag.Bool("version", false, "print version information and exit")
