@@ -1,0 +1,72 @@
+# GoReleaser configuration for lazysnap.
+# Docs: https://goreleaser.com
+version: 2
+
+project_name: lazysnap
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: lazysnap
+    binary: lazysnap
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: lazysnap
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: lazysnap
+    repository:
+      owner: jpdarago
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/jpdarago/lazysnap"
+    description: "A TUI for browsing and restoring tarsnap archives"
+    license: "MIT"
+    commit_author:
+      name: goreleaserbot
+      email: goreleaserbot@users.noreply.github.com
+    dependencies:
+      - name: tarsnap
+    test: |
+      system "#{bin}/lazysnap", "--version"
+
+release:
+  draft: false
+  prerelease: auto

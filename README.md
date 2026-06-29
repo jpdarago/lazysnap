@@ -119,6 +119,24 @@ The cache lives at `~/.cache/lazysnap/cache.db` (respects `$XDG_CACHE_HOME`).
 - **Config file management** — it reads `tarsnap.conf` but does not manage it.
 - **Multi-machine** — operates on the local machine's tarsnap keyfile only.
 
+## Install
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew install jpdarago/tap/lazysnap
+```
+
+This also installs `tarsnap` as a dependency.
+
+### From source
+
+```sh
+go install github.com/jpdarago/lazysnap@latest
+```
+
+Or download a prebuilt binary from the [releases page](https://github.com/jpdarago/lazysnap/releases).
+
 ## Getting Started
 
 ```sh

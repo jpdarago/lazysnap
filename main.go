@@ -12,10 +12,23 @@ import (
 	"github.com/jpdarago/lazysnap/internal/ui"
 )
 
+// Build metadata, injected at release time via -ldflags by GoReleaser.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	keyfile := flag.String("keyfile", "", "path to tarsnap key file (optional, defaults to tarsnaprc)")
 	timeout := flag.Duration("timeout", 30*time.Minute, "timeout for tarsnap commands (0 to disable)")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("lazysnap %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
 
 	db, err := cache.Open()
 	if err != nil {
